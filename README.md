@@ -1,8 +1,8 @@
-# homework 下载脚本
+# 下载脚本
 #!/bin/bash
 set -euo pipefail
 export PATH=/mnt/alamo01/yuansongwei7@mgt01:/mnt/alamo01/users/yuansongwei7:$PATH
-# 
+
 OUTDIR="/mnt/alamo01/users/yuansongwei7/download_data/GSE255647"
 mkdir -p "$OUTDIR"
 
@@ -62,3 +62,71 @@ for srr in "${SRR_LIST[@]}"; do
 done
 
 echo "▒~V~R~_~N~I All downloads and conversions completed."
+
+
+
+# fastq转换格式
+# fastp质控
+# 下载物种参考基因组和基因注释（GTF文件）
+# 用hisat2-build构建索引，hisat2比对
+# 使用stringtie进行转录本组装和基因定量
+# 输出：比对结果（BAM）、定量矩阵
+# DESeq2进行差异表达分析。
+#载入必要包
+library(DESeq2)
+
+#读取计数矩阵，跳过前几行注释
+counts <- read.table("gene_counts.txt", header=TRUE, row.names=1, comment.char="#")
+
+#删除注释列，featureCounts默认多了几列非样本列（比如 Chr, Start, End）
+counts <- counts[, -(1:5)]  # 保留纯计数数据列，具体列数根据实际文件调整
+
+#构建样本信息表 (这里请你根据实际样本分组填充)
+sample_info <- data.frame(
+  row.names = colnames(counts),
+  condition = c(rep("mock", 9), rep("SARS-CoV2", 9), rep("SARS-CoV1", 9)) # 举例
+)
+
+#构建DESeq2数据集对象
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = sample_info,
+                              design = ~ condition)
+
+#运行差异分析
+dds <- DESeq(dds)
+
+#获取差异表达结果，比较组名请替换为你感兴趣的组
+res <- results(dds, contrast=c("condition", "SARS-CoV2", "mock"))
+
+#简单查看结果
+head(res)
+
+#保存结果
+write.csv(as.data.frame(res), file="DEG_SARSCoV2_vs_Mock.csv")
+
+# RNA-seq 分析结果富集与网络可视化
+
+#示例：根据富集结果构建 igraph 网络图
+library(clusterProfiler)
+library(igraph)
+library(tidyverse)
+
+#假设你已经完成了富集分析，拿到了 enrichGO 结果
+go_result <- read.csv("go_enrich_result.csv")  # 可改为 enrichGO() 结果对象
+
+#示例构建图（根据 term 与 gene 的关系）
+edges <- go_result %>%
+  separate_rows(geneID, sep = "/") %>%
+  select(Term = Description, Gene = geneID)
+
+#构建 igraph 对象
+g <- graph_from_data_frame(edges, directed = FALSE)
+
+#简单可视化
+plot(g,
+     vertex.label.cex = 0.7,
+     vertex.size = 5,
+     vertex.label.color = "black",
+     edge.color = "grey")
+
+

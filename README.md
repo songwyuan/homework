@@ -117,9 +117,75 @@ echo "▒~V~R~_~N~I All downloads and conversions completed."
 
 3. 质控：fastqc和multiqc
 
-4. 清洗：fastp（去低质、去接头）
+ # fastqc
+#!/bin/bash
+# fastqc_all.sh：质控所有 .fastq.gz 文件
 
-5. 输出：质控报告、清洗后数据
+set -euo pipefail
+
+FASTQ_DIR="/mnt/alamo01/users/yuansongwei7/project_rnaseq/virus_projects/SARS-CoV-2/GSE255647/data/fastq"
+OUT_DIR="/mnt/alamo01/users/yuansongwei7/results/fastqc/raw"
+
+mkdir -p "$OUT_DIR"
+cd "$FASTQ_DIR"
+
+for fq in *.fastq.gz; do
+    echo "Running fastqc for $fq ..."
+    fastqc -o "$OUT_DIR" "$fq"
+done
+
+# multiqc
+#!/bin/bash
+set -euo pipefail
+
+#multiqc 汇总 fastp 结果
+FASTP_RESULT_DIR="/mnt/alamo01/users/yuansongwei7/project_rnaseq/virus_projects/SARS-CoV-2/GSE255647/results/fastp/clean"
+OUT_DIR="/mnt/alamo01/users/yuansongwei7/project_rnaseq/virus_projects/SARS-CoV-2/GSE255647/results/multiqc"
+
+mkdir -p "$OUT_DIR"
+
+cd "$FASTP_RESULT_DIR"
+multiqc . -o "$OUT_DIR"
+
+echo "MultiQC report generated at $OUT_DIR"
+
+
+
+6. 清洗：fastp（去低质、去接头）
+
+#!/bin/bash
+# 在download_data/GSE255647目录下运行
+
+OUTDIR="/mnt/alamo01/users/yuansongwei7/download_data/fastq"
+SRADIR="/mnt/alamo01/users/yuansongwei7/download_data/GSE255647"
+mkdir -p "$OUTDIR" || { echo "wrong outdir"; exit 1; }
+THREADS=4
+
+for sra in "$SRADIR"/*.sra; do
+    SRR=$(basename "$sra" .sra)
+    echo "===== 转换 $SRR ====="
+
+    # 检查SRA文件是否存在
+    if [ ! -f "$sra" ]; then
+        echo "错误：文件 $sra 不存在，跳过"
+        continue
+    fi
+
+    fastq-dump "$sra" \
+      --split-files \
+      --gzip \
+      --outdir "$OUTDIR"
+
+    # 检查压缩后的文件是否存在
+    if [[ -f "$OUTDIR/${SRR}_1.fastq.gz" && -f "$OUTDIR/${SRR}_2.fastq.gz" ]]; then
+        echo "✓ $SRR 转换成功"
+    else
+        echo "❌ $SRR 转换失败！请检查"
+    fi
+done
+
+
+6. 输出：质控报告、清洗后数据
 
 **思考题**：
 
@@ -128,16 +194,200 @@ echo "▒~V~R~_~N~I All downloads and conversions completed."
 ### 模块3：比对与定量
 
 **目标**：基于参考基因组构建索引并进行比对与定量。
-
+project_rnaseq/
+├── mapping/
+│   └── hisat2/
+│       ├── SRR27961772.sorted.bam
+│       └── ...
+├── quantification/
+│   └── stringtie/
+│       ├── SRR27961772.gtf
+│       └── ...
+├── genome_index/
+│   └── hg38/
+│       └── gencode.v43.annotation.gtf
+└── scripts/
+    ├── stringtie_all.sh
+    ├── SRR27961772_stringtie.sh
+    └── logs/
+        ├── SRR27961772_stringtie.o
+        └── SRR27961772_stringtie.e
 **任务**：
 
 1. 下载物种参考基因组和基因注释（GTF文件）
+   #!/bin/bash
+set -euo pipefail
 
-2. 用hisat2-build构建索引，hisat2比对
+#下载与保存路径
+GENOME_DIR="/mnt/alamo01/users/yuansongwei7/genome_index/hg38"
+mkdir -p "$GENOME_DIR"
 
-3. 使用stringtie进行转录本组装和基因定量
+echo ">>> 开始下载人类参考基因组（FASTA）..."
+FA_URL="https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_43/GRCh38.primary_assembly.genome.fa.gz"
+FA_GZ="$GENOME_DIR/GRCh38.primary_assembly.genome.fa.gz"
+FA_FILE="$GENOME_DIR/GRCh38.primary_assembly.genome.fa"
 
-4. 输出：比对结果（BAM）、定量矩阵
+#下载FASTA
+wget -c -O "$FA_GZ" "$FA_URL"
+
+#解压
+echo ">>> 解压参考基因组..."
+gunzip -c "$FA_GZ" > "$FA_FILE"
+
+echo ">>> 下载人类基因注释文件（GTF）..."
+GTF_URL="https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_43/gencode.v43.annotation.gtf.gz"
+GTF_GZ="$GENOME_DIR/gencode.v43.annotation.gtf.gz"
+GTF_FILE="$GENOME_DIR/gencode.v43.annotation.gtf"
+
+#下载GTF
+wget -c -O "$GTF_GZ" "$GTF_URL"
+
+#解压
+echo ">>> 解压GTF文件..."
+gunzip -c "$GTF_GZ" > "$GTF_FILE"
+
+#检查
+echo ">>> 检查文件是否存在..."
+[[ -f "$FA_FILE" ]] && echo "✔ FASTA 准备完成：$FA_FILE" || echo "✘ FASTA 文件缺失！"
+[[ -f "$GTF_FILE" ]] && echo "✔ GTF 准备完成：$GTF_FILE" || echo "✘ GTF 文件缺失！"
+
+
+3. 用hisat2-build构建索引，hisat2比对
+
+   #!/bin/bash
+# hisat2索引构建脚本（适用于人类参考基因组 hg38）
+
+set -euo pipefail
+
+echo ">>> 开始构建 hisat2 索引..."
+
+#路径配置
+GENOME_FA="/mnt/alamo01/users/yuansongwei7/genome_index/hg38/GRCh38.primary_assembly.genome.fa"
+OUTDIR="/mnt/alamo01/users/yuansongwei7/genome_index/hg38"
+BASENAME="hg38"
+
+#创建输出目录（如果不存在）
+mkdir -p "$OUTDIR"
+
+#构建索引
+hisat2-build -p 16 "$GENOME_FA" "$OUTDIR/$BASENAME"
+
+echo ">>> hisat2 索引构建完成！"
+
+
+# hisatall。sh
+
+#!/bin/bash
+# hisat2_all.sh：自动批量提交比对作业
+set -euo pipefail
+
+# 输入输出路径
+FASTQ_DIR="/mnt/alamo01/users/yuansongwei7/download_data/GSE255647_analysis/cleaned_data"
+OUTDIR="/mnt/alamo01/users/yuansongwei7/project_rnaseq/mapping/hisat2"
+INDEX="/mnt/alamo01/users/yuansongwei7/genome_index/hg38/hg38"
+LOGDIR="./logs"
+mkdir -p "$OUTDIR" "$LOGDIR"
+
+# 启用更严格匹配
+shopt -s nullglob
+
+# 遍历所有 *_1.fastq.gz 文件
+for f1 in "$FASTQ_DIR"/*_1.fastq.gz; do
+    # 获取SRR编号
+    base=$(basename "$f1" _1.fastq.gz)
+    f2="$FASTQ_DIR/${base}_2.fastq.gz"
+
+    # 检查配对文件存在
+    if [[ ! -f "$f2" ]]; then
+        echo "❌ 配对文件缺失: $f2"
+        continue
+    fi
+
+    # 输出文件名
+    BAM="$OUTDIR/${base}.sorted.bam"
+
+    # 比对作业脚本内容
+    cat <<EOF > "${base}_hisat2.sh"
+#!/bin/bash
+#PBS -N hisat2_$base
+#PBS -q fast
+#PBS -l cpu=64
+#PBS -l mem=64G
+#PBS -o $LOGDIR/hisat2_${base}.o
+#PBS -e $LOGDIR/hisat2_${base}.e
+#PBS -V
+#PBS -cwd
+
+source ~/.bashrc
+micromamba activate rnaseq
+
+hisat2 -p 64 -x $INDEX -1 $f1 -2 $f2 \
+  | samtools sort -@ 32 -o "$BAM"
+
+samtools index "$BAM"
+EOF
+
+    # 提交任务
+    qsub "${base}_hisat2.sh"
+    echo "✓ 已提交: $base"
+done
+
+
+5. 使用stringtie进行转录本组装和基因定量
+
+#!/bin/bash
+set -euo pipefail
+#-------------------------------------------------------------------
+#Script Name: stringtie_all.sh
+#Description: 批量处理 HISAT2 比对结果，进行转录本定量分析。
+#Author: ChatGPT for yuansongwei7
+#Date: 2025-07-11
+#-------------------------------------------------------------------
+
+#设置路径变量
+BAM_DIR="/mnt/alamo01/users/yuansongwei7/project_rnaseq/mapping/hisat2"
+GTF="/mnt/alamo01/users/yuansongwei7/genome_index/hg38/gencode.v43.annotation.gtf"
+OUT_ROOT="/mnt/alamo01/users/yuansongwei7/project_rnaseq/quantification/stringtie"
+LOG_DIR="/mnt/alamo01/users/yuansongwei7/scripts/logs"
+SCRIPT_DIR="/mnt/alamo01/users/yuansongwei7/scripts"
+
+#创建日志目录
+mkdir -p "$OUT_ROOT" "$LOG_DIR"
+
+#遍历所有 BAM 文件
+for bam_file in ${BAM_DIR}/*.sorted.bam; do
+  base=$(basename "$bam_file" .sorted.bam)
+  outdir="${OUT_ROOT}/${base}"
+  SCRIPT="${SCRIPT_DIR}/${base}_stringtie.sh"
+
+  mkdir -p "$outdir"
+
+  cat <<EOF > "$SCRIPT"
+#!/bin/bash
+source ~/.bashrc
+micromamba activate rnaseq
+
+mkdir -p "$outdir"
+
+stringtie "$bam_file" \\
+  -G "$GTF" \\
+  -o "$outdir/out.gtf" \\
+  -p 32 -e -B
+EOF
+
+  chmod +x "$SCRIPT"
+
+  qsub -cwd -V -l cpu=64:mem=64G -q fast \
+       -o "$LOG_DIR/${base}_stringtie.o" \
+       -e "$LOG_DIR/${base}_stringtie.e" \
+       -N "stringtie_${base}" \
+       "$SCRIPT"
+
+  echo "✓ 已提交：$base"
+done
+
+
+6. 输出：比对结果（BAM）、定量矩阵
 
 **思考题**：
 
